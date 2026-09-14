@@ -6,8 +6,7 @@ plugins {
 
 android {
     namespace = "com.example.galleryassist"
-    // Compose BOM 2026.08.00 (Compose 1.12.x) requires compiling against API 37.
-    compileSdk = 37
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.example.galleryassist"

@@ -3,7 +3,10 @@
 # in automatically by AGP; the Compose compiler plugin must match that version.
 agp = "9.1.1"
 kotlin = "2.2.10"
-composeBom = "2026.08.00"
+# 2026.08.00+ pulls Compose 1.12.x, which requires compileSdk 37 — but no
+# stable android-37 platform is published yet (only 37.x betas). 2026.06.01
+# pins Compose 1.11.4, the newest line that compiles against SDK 36.
+composeBom = "2026.06.01"
 activityCompose = "1.11.0"
 coreKtx = "1.15.0"
 lifecycle = "2.8.7"
