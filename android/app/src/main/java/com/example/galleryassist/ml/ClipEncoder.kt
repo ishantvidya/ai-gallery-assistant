@@ -8,21 +8,26 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import java.io.File
 import java.nio.FloatBuffer
+import java.nio.LongBuffer
 
 /**
- * On-device CLIP image encoder — the M0 winner (ViT-B/32 int8) via ONNX Runtime.
+ * On-device CLIP encoder (ViT-B/32 int8) via ONNX Runtime — both towers.
  *
  * Port of the desktop app's embedding step (src/model.py). Preprocessing mirrors
  * the CLIPProcessor used in the PC benchmark: resize to 224, center crop, RGB,
  * scale to [0,1], normalize with the OpenAI CLIP mean/std.
  *
- * The text tower is stubbed until M3 (needs a Kotlin BPE tokenizer); the
- * smoke-test hook lets us time image embedding on real phone hardware, which
- * is the M0 exit criterion that still needs phone numbers.
+ * Models are bundled in the APK (assets/) and copied into app-private storage
+ * on first run — ONNX Runtime needs a real file path. The text tower turns a
+ * query into a 512-dim vector; the image tower does the same for photos during
+ * indexing. Both outputs are unit-normalized, so cosine similarity is a dot
+ * product.
  */
 class ClipEncoder private constructor(
     private val env: OrtEnvironment,
     private val imageSession: OrtSession,
+    private val textSession: OrtSession,
+    private val tokenizer: ClipTokenizer,
 ) : AutoCloseable {
 
     /** Embeds one image into a 512-dim unit vector (float array). */
@@ -39,8 +44,32 @@ class ClipEncoder private constructor(
         }
     }
 
+    /** Encodes one text query into a 512-dim unit vector (float array). */
+    fun encodeText(text: String): FloatArray {
+        val ids = tokenizer.encode(text)
+        val shape = longArrayOf(1, ClipTokenizer.MAX_LEN.toLong())
+        val buffer = LongBuffer.wrap(ids.map { it.toLong() }.toLongArray())
+        OnnxTensor.createTensor(env, buffer, shape).use { tensor ->
+            textSession.run(mapOf(TEXT_INPUT_NAME to tensor)).use { results ->
+                @Suppress("UNCHECKED_CAST")
+                val vec = (results[0].value as Array<FloatArray>)[0]
+                l2Normalize(vec)
+                return vec
+            }
+        }
+    }
+
+    /** Dot product of two unit vectors == cosine similarity. */
+    fun dot(a: FloatArray, b: FloatArray): Float {
+        var s = 0f
+        val n = minOf(a.size, b.size)
+        for (i in 0 until n) s += a[i] * b[i]
+        return s
+    }
+
     override fun close() {
         imageSession.close()
+        textSession.close()
     }
 
     // --- Preprocessing: bitmap -> CHW float32 normalized tensor -------------
@@ -83,31 +112,71 @@ class ClipEncoder private constructor(
         private val MEAN = floatArrayOf(0.48145466f, 0.4578275f, 0.40821073f)
         private val STD = floatArrayOf(0.26862954f, 0.26130258f, 0.27577711f)
 
-        // Input name of models/onnx/clip-b32-image-*.onnx as exported.
+        // Input names of the exported towers (scripts/export_clip_b32_onnx.py).
         private const val IMAGE_INPUT_NAME = "pixel_values"
+        private const val TEXT_INPUT_NAME = "input_ids"
 
-        /** Expected file names inside app-private filesDir (adb-pushed for now). */
-        const val IMAGE_MODEL_FILE = "clip-b32-image-int8.onnx"
+        /** Model file names, bundled in APK assets and copied to filesDir. */
+        const val IMAGE_MODEL_ASSET = "clip-b32-image-int8.onnx"
+        const val TEXT_MODEL_ASSET = "clip-b32-text-int8.onnx"
+        private const val TOKENIZER_ASSET_DIR = "tokenizer"
+
+        /** Model file, extracted into app-private storage on first run. */
+        fun imageModelFile(context: Context): File =
+            File(context.filesDir, IMAGE_MODEL_ASSET)
+
+        /** True once both model files have been extracted and exist. */
+        fun assetsExtracted(context: Context): Boolean =
+            imageModelFile(context).exists() &&
+                File(context.filesDir, TEXT_MODEL_ASSET).exists()
+
+        /** Copies one asset to filesDir if missing or stale (size mismatch). */
+        private fun extractAsset(context: Context, assetName: String): File {
+            val out = File(context.filesDir, assetName)
+            val expectedLen = try {
+                context.assets.openFd(assetName).use { it.length }
+            } catch (e: Exception) {
+                -1L // compressed assets have no fd; size check unavailable
+            }
+            if (!out.exists() || out.length() == 0L ||
+                (expectedLen > 0 && out.length() != expectedLen)
+            ) {
+                context.assets.open(assetName).use { input ->
+                    val tmp = File(context.filesDir, "$assetName.tmp")
+                    tmp.outputStream().use { output -> input.copyTo(output, COPY_BUFFER) }
+                    if (tmp.renameTo(out)) {
+                        // fast path done
+                    } else {
+                        // rename can fail across mount points; copy explicitly
+                        tmp.inputStream().use { input2 ->
+                            out.outputStream().use { input2.copyTo(it, COPY_BUFFER) }
+                        }
+                        tmp.delete()
+                    }
+                }
+            }
+            return out
+        }
 
         /**
-         * Loads the image tower from app-private storage.
-         *
-         * For M1 the ~90 MB int8 model is pushed with adb (see android/README.md);
-         * first-run download vs Play Asset Delivery is an M0/M1 open decision.
+         * Extracts bundled models + tokenizer to app storage and loads both
+         * towers. First call costs a one-time ~155 MB copy + session load.
          */
-        fun fromFiles(context: Context): ClipEncoder {
+        fun fromContext(context: Context): ClipEncoder {
             val env = OrtEnvironment.getEnvironment()
-            val modelFile = File(context.filesDir, IMAGE_MODEL_FILE)
-            require(modelFile.exists()) {
-                "${modelFile.absolutePath} not found — push it via adb (android/README.md)"
-            }
+            val imageFile = extractAsset(context, IMAGE_MODEL_ASSET)
+            val textFile = extractAsset(context, TEXT_MODEL_ASSET)
             val opts = OrtSession.SessionOptions().apply {
                 // Leave thread count at ORT defaults tuned for big.LITTLE phones.
                 setCPUArenaAllocator(true)
             }
-            val session = env.createSession(modelFile.absolutePath, opts)
-            return ClipEncoder(env, session)
+            val imageSession = env.createSession(imageFile.absolutePath, opts)
+            val textSession = env.createSession(textFile.absolutePath, opts)
+            val tokenizer = ClipTokenizer.fromAssets(context, TOKENIZER_ASSET_DIR)
+            return ClipEncoder(env, imageSession, textSession, tokenizer)
         }
+
+        private const val COPY_BUFFER = 1 shl 16
 
         private fun l2Normalize(v: FloatArray) {
             var s = 0f

@@ -16,20 +16,25 @@ import kotlinx.coroutines.withContext
 suspend fun runModelSmokeTest(context: Context): String = withContext(Dispatchers.Default) {
     runCatching {
         val t0 = System.nanoTime()
-        val engine = ClipOnnxEngine.fromFiles(context)
+        val engine = ClipOnnxEngine.fromContext(context)
         val loadMs = (System.nanoTime() - t0) / 1_000_000
-        val embedMs = try {
+        val result = try {
             val bmp = Bitmap.createBitmap(224, 224, Bitmap.Config.ARGB_8888).apply {
                 eraseColor(Color.rgb(120, 90, 200))
             }
             engine.embedImage(bmp) // warm-up (first inference allocates arenas)
             val t1 = System.nanoTime()
             engine.embedImage(bmp)
-            (System.nanoTime() - t1) / 1_000_000
+            val embedMs = (System.nanoTime() - t1) / 1_000_000
+            val t2 = System.nanoTime()
+            val textVec = engine.encodeText("a photo of a bed")
+            val textMs = (System.nanoTime() - t2) / 1_000_000
+            "session load: $loadMs ms\nimage embed (warm): $embedMs ms\n" +
+                "text embed: $textMs ms\ntext dim: ${textVec.size}"
         } finally {
             engine.close()
         }
-        "session load: $loadMs ms\nimage embed (warm): $embedMs ms"
+        result
     }.fold(
         onSuccess = { it },
         onFailure = { "smoke test FAILED: ${it.message}" },

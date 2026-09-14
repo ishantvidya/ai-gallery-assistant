@@ -25,4 +25,9 @@ data class PhotoMetadata(
     @SerialName("bucketDisplayName") val bucketDisplayName: String?,
     @SerialName("width") val width: Int?,
     @SerialName("height") val height: Int?,
+    /** 512-dim unit CLIP embedding; null until the on-device model has
+     *  processed the photo (older indexes keep null and search falls back to
+     *  metadata matching). Serialized as a JSON float array (~2.7 KB/photo).
+     *  Mutable: filled in by the indexer's embedding pass. */
+    @SerialName("embedding") var embedding: FloatArray? = null,
 )

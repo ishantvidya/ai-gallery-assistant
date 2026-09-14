@@ -63,6 +63,8 @@ class GalleryIndexer(
         // 2. (Persistence is the caller's job: it knows the permission scope.)
 
         // 3. Embedding pass — skipped entirely when no engine is provided.
+        //    Results are written back into each PhotoMetadata.embedding so the
+        //    caller persists them with the metadata in one file.
         if (engine != null) {
             for (photo in photos) {
                 currentCoroutineContext().ensureActive() // cooperative cancel on revoke/exit
@@ -70,6 +72,7 @@ class GalleryIndexer(
                 val bmp: Bitmap? = repository.decodeThumbnail(Uri.parse(photo.contentUri))
                 if (bmp != null) {
                     runCatching { engine.embedImage(bmp) }
+                        .onSuccess { photo.embedding = it }
                         .onFailure { Log.w(TAG, "embed failed for ${photo.id}", it) }
                     bmp.recycle()
                 }

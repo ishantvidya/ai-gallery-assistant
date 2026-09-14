@@ -2,7 +2,6 @@ package com.example.galleryassist.ml
 
 import android.content.Context
 import android.graphics.Bitmap
-import java.io.File
 
 /**
  * The seam between gallery indexing and the AI model.
@@ -19,8 +18,8 @@ interface EmbeddingEngine : AutoCloseable {
     fun embedImage(bitmap: Bitmap): FloatArray
 
     companion object {
-        /** True when the on-device model file is present in app storage. */
+        /** True once both bundled model files are extracted in app storage. */
         fun modelAvailable(context: Context): Boolean =
-            File(context.filesDir, ClipEncoder.IMAGE_MODEL_FILE).exists()
+            ClipEncoder.assetsExtracted(context)
     }
 }

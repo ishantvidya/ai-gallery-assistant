@@ -18,6 +18,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -28,29 +29,51 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import com.example.galleryassist.data.PhotoMetadata
-import java.time.Instant
-import java.time.ZoneId
-import java.time.format.TextStyle
-import java.util.Locale
+import com.example.galleryassist.data.matchingMetadata
+import kotlinx.coroutines.delay
 
 /**
- * Main gallery/search interface. Shows the photos discovered via MediaStore
- * (metadata only — images load straight from their content URIs, no copies)
- * and the search bar.
+ * Main gallery/search interface over the indexed photos.
  *
- * Search today matches **metadata**: filename, album/bucket name, and the
- * photo's date (year, full and abbreviated month names). All tokens must
- * match somewhere (AND semantics), so "beach 2024" narrows step by step.
- * Semantic "describe it to find it" ranking with the on-device CLIP model
- * lands in M3 — it needs the model + stored image embeddings.
+ * How a query is answered (best available wins, all on-device):
+ *  1. **Semantic** (when the photo has CLIP embeddings): the query is encoded
+ *     by the on-device text tower and photos are ranked by cosine similarity
+ *     — "bed", "dog at the beach", "two people laughing" work.
+ *  2. **Metadata fallback**: filename / album / date token matching, shown
+ *     instantly while the semantic ranking is computed (and used exclusively
+ *     when embeddings aren't available yet).
  */
 @Composable
 fun SearchScreen(
     photos: List<PhotoMetadata>,
+    onRank: (query: String, onResult: (List<PhotoMetadata>) -> Unit) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var query by remember { mutableStateOf("") }
-    val filtered = remember(photos, query) { photos.matching(query) }
+    var semanticResults by remember { mutableStateOf<List<PhotoMetadata>?>(null) }
+    var searching by remember { mutableStateOf(false) }
+
+    val metaResults = remember(photos, query) {
+        if (query.isBlank()) photos else photos.matchingMetadata(query)
+    }
+
+    // Debounced semantic ranking; metadata results show immediately.
+    LaunchedEffect(photos, query) {
+        semanticResults = null
+        if (query.isBlank()) {
+            searching = false
+        } else {
+            searching = true
+            delay(SEARCH_DEBOUNCE_MS)
+            onRank(query) { ranked ->
+                semanticResults = ranked
+                searching = false
+            }
+        }
+    }
+
+    val display = semanticResults ?: metaResults
+    val embeddedCount = remember(photos) { photos.count { it.embedding != null } }
 
     Column(modifier = modifier.fillMaxSize().padding(16.dp)) {
         OutlinedTextField(
@@ -63,25 +86,39 @@ fun SearchScreen(
         Spacer(Modifier.height(8.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
             val count = if (query.isBlank()) "${photos.size} photos indexed"
-            else "${filtered.size} of ${photos.size} photos match"
+            else "${display.size} of ${photos.size} match"
             Text(count, style = MaterialTheme.typography.bodySmall)
-            Spacer(Modifier.width(12.dp))
+            if (searching) {
+                Spacer(Modifier.width(8.dp))
+                Text("· ranking by meaning…", style = MaterialTheme.typography.bodySmall)
+            }
         }
         Spacer(Modifier.height(8.dp))
         Card {
             Column(Modifier.padding(12.dp)) {
-                Text(
-                    "Search matches filenames, albums and dates — all on this phone, nothing uploaded.",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                Text(
-                    "\"Describe it to find it\" search arrives with the on-device AI model (M3).",
-                    style = MaterialTheme.typography.bodySmall,
-                )
+                if (embeddedCount > 0) {
+                    Text(
+                        "AI search is on — describe what's in the photo (\"bed\", \"human\", \"sunset\").",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Text(
+                        "$embeddedCount/${photos.size} photos have AI embeddings · filenames/albums/dates also match · nothing leaves this phone.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                } else {
+                    Text(
+                        "Search matches filenames, albums and dates — all on this phone, nothing uploaded.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Text(
+                        "AI \"describe it to find it\" search activates after the next re-index (photos are being embedded).",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
             }
         }
         Spacer(Modifier.height(12.dp))
-        if (filtered.isEmpty() && query.isNotBlank()) {
+        if (display.isEmpty() && query.isNotBlank()) {
             Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                 Text(
                     "No photos match \u201C$query\u201D",
@@ -96,7 +133,7 @@ fun SearchScreen(
                 verticalArrangement = Arrangement.spacedBy(6.dp),
                 modifier = Modifier.weight(1f),
             ) {
-                items(filtered, key = { it.id }) { photo ->
+                items(display, key = { it.id }) { photo ->
                     AsyncImage(
                         model = photo.contentUri,
                         contentDescription = photo.displayName,
@@ -109,22 +146,4 @@ fun SearchScreen(
     }
 }
 
-/** Photos matching every whitespace-separated token in [query] (case-insensitive). */
-private fun List<PhotoMetadata>.matching(query: String): List<PhotoMetadata> {
-    val tokens = query.lowercase().split(Regex("\\s+")).filter { it.isNotBlank() }
-    if (tokens.isEmpty()) return this
-    return filter { p ->
-        val fields = buildList {
-            add(p.displayName.lowercase())
-            p.bucketDisplayName?.let { add(it.lowercase()) }
-            val sec = p.dateTakenSec ?: p.dateModifiedSec
-            if (sec != null && sec > 0) {
-                val date = Instant.ofEpochSecond(sec).atZone(ZoneId.systemDefault())
-                add(date.year.toString())
-                add(date.month.getDisplayName(TextStyle.FULL, Locale.ROOT).lowercase(Locale.ROOT))
-                add(date.month.getDisplayName(TextStyle.SHORT, Locale.ROOT).lowercase(Locale.ROOT))
-            }
-        }
-        tokens.all { t -> fields.any { it.contains(t) } }
-    }
-}
+private const val SEARCH_DEBOUNCE_MS = 350L

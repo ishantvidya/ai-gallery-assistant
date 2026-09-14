@@ -13,8 +13,8 @@ android {
         minSdk = 26
         // Play Store requirement (Aug 2026): new apps must target API 36.
         targetSdk = 36
-        versionCode = 2
-        versionName = "0.1.1"
+        versionCode = 3
+        versionName = "0.2.0"
     }
 
     // Release signing comes from CI secrets (see .github/workflows/android-release.yml).

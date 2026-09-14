@@ -62,16 +62,24 @@ gradle :app:assembleDebug
 6. **Scope change**: switch full ↔ selected in system settings → next resume
    re-indexes with the new scope automatically.
 
-## Dev model provisioning (until the compressed model is bundled)
+## Models (bundled in the APK since v0.2.0)
 
-```bash
-adb push models/onnx/clip-b32-image-int8.onnx \
-  /data/data/com.example.galleryassist/files/clip-b32-image-int8.onnx
-```
+Both int8 towers (image + text, ~155 MB) ship inside the APK under
+`android/app/src/main/assets/`, together with the CLIP tokenizer
+(`assets/tokenizer/clip-vocab.json`, `clip-merges.txt`). On first run they
+are copied into app-private storage (`filesDir/`) — ONNX Runtime needs a
+real file path — and both sessions load from there.
 
-Indexing works without the model (metadata-only); embeddings start
-automatically once it's present. `ml/SmokeTest.kt` has the M0 phone
-smoke test (session load + warm embed latency) for a Settings screen.
+After an app update that changes the bundled models, bump the APK size
+check: `ClipEncoder.extractAsset` re-extracts when the stored file size
+differs from the asset.
+
+`scripts/check_tokenizer_port.py` is the tokenizer parity guard: the Kotlin
+`ClipTokenizer` must reproduce the reference ids for its golden texts
+(run it whenever the export/tokenizer stack changes). Indexing still works
+if the engine can't load — search then falls back to metadata matching.
+`ml/SmokeTest.kt` times session load + warm image/text embed for a future
+Settings screen.
 
 ## Project layout
 

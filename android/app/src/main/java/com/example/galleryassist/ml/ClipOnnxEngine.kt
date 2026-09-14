@@ -16,10 +16,17 @@ class ClipOnnxEngine private constructor(
 
     override fun embedImage(bitmap: Bitmap): FloatArray = encoder.encodeImage(bitmap)
 
+    /** Encodes one text query into a 512-dim unit vector. */
+    fun encodeText(text: String): FloatArray = encoder.encodeText(text)
+
+    /** Cosine similarity of two unit vectors (plain dot product). */
+    fun dot(a: FloatArray, b: FloatArray): Float = encoder.dot(a, b)
+
     override fun close() = encoder.close()
 
     companion object {
-        fun fromFiles(context: Context): ClipOnnxEngine =
-            ClipOnnxEngine(ClipEncoder.fromFiles(context))
+        /** Extracts bundled models (first run) and loads both towers. */
+        fun fromContext(context: Context): ClipOnnxEngine =
+            ClipOnnxEngine(ClipEncoder.fromContext(context))
     }
 }

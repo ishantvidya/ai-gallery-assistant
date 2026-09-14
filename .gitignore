@@ -9,5 +9,6 @@ embeddings/
 # Your personal photos
 data/images/
 
-# ONNX models — too large for GitHub (pushed to device via adb instead, see android/README.md)
-models/
+# ONNX dev-export models (repo root only) — the app bundles its int8 models
+# under android/app/src/main/assets/, which stays tracked.
+/models/

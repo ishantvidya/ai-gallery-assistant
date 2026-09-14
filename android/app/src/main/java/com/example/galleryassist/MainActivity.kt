@@ -63,6 +63,9 @@ private fun AppRoot(viewModel: GalleryViewModel) {
     when (val s = stage) {
         AppStage.NeedAccess -> PhotoAccessScreen(onGranted = { viewModel.onPermissionChanged() })
         AppStage.Indexing -> IndexingScreen(progress = viewModel.indexingProgress.collectAsStateWithLifecycle().value)
-        is AppStage.Ready -> SearchScreen(photos = s.photos)
+        is AppStage.Ready -> SearchScreen(
+            photos = s.photos,
+            onRank = { query, onResult -> viewModel.rank(query, viewModel.currentPhotosSnapshot(), onResult) },
+        )
     }
 }
