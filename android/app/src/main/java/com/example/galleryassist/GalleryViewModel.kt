@@ -7,6 +7,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.galleryassist.data.PhotoMetadata
 import com.example.galleryassist.data.PhotoRepository
 import com.example.galleryassist.data.matchingMetadata
+import com.example.galleryassist.diag.Diagnostics
 import com.example.galleryassist.index.GalleryIndexer
 import com.example.galleryassist.index.IndexingProgress
 import com.example.galleryassist.ml.ClipOnnxEngine
@@ -51,6 +52,11 @@ sealed interface AppStage {
  * Re-scan triggers: first grant, scope change (FULL ⇄ PARTIAL / revoke →
  * re-grant), and every app open (picks up new/removed photos; saved
  * embeddings are carried over by photo id, so completed work is never redone).
+ *
+ * DIAGNOSTIC BUILD (v0.2.2): every step above is recorded into
+ * [Diagnostics] (rendered by the on-screen panel), and failures NEVER drop
+ * the app back to NeedAccess — we always land in Ready so the panel with the
+ * recorded root cause stays visible.
  */
 class GalleryViewModel(app: Application) : AndroidViewModel(app) {
 
@@ -62,6 +68,9 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
 
     val indexingProgress: StateFlow<IndexingProgress> = indexer.progress
 
+    /** DIAGNOSTIC BUILD: live event log, shown by the UI's diag panel. */
+    val diag: StateFlow<List<Diagnostics.Event>> = Diagnostics.events
+
     /** Latest photo list (for the UI's ranking calls). */
     private var currentPhotos: List<PhotoMetadata> = emptyList()
 
@@ -72,12 +81,17 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
     private var engine: ClipOnnxEngine? = null
     private val engineMutex = Mutex()
 
+    private var engineFailed = false
     private var indexJob: Job? = null
     private var queryJob: Job? = null
+
+    /** Throttle for rank() logging — queries fire per keystroke. */
+    private var lastRankLogMs = 0L
 
     /** Called by the UI after the user grants (or changes) photo access. */
     fun onPermissionChanged() {
         val access = PhotoPermissions.currentAccess(getApplication())
+        Diagnostics.log("permission: $access")
         if (access == PhotoAccess.NONE) {
             indexJob?.cancel()
             queryJob?.cancel()
@@ -97,16 +111,38 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
      */
     private fun startLifecycle(access: PhotoAccess) {
         _stage.value = AppStage.Indexing
-        val savedById = repository.loadIndex()
-            ?.takeIf { it.accessScope == access.name }
-            ?.photos
-            ?.associateBy { it.id }
-            ?: emptyMap()
 
+        var scanned: List<PhotoMetadata> = emptyList()
         indexJob = viewModelScope.launch {
             try {
+                // 0. Load the saved index off the main thread (it can be tens
+                //    of MB once embeddings are persisted).
+                val saved = withContext(Dispatchers.IO) {
+                    repository.loadIndex { detail ->
+                        Diagnostics.log("saved index: PARSE FAILED — $detail")
+                    }
+                }
+                val savedById = saved
+                    ?.takeIf { it.accessScope == access.name }
+                    ?.photos
+                    ?.associateBy { it.id }
+                    ?: emptyMap()
+                Diagnostics.log(
+                    "saved index: " + when {
+                        saved == null ->
+                            "none (first run)"
+                        saved.accessScope != access.name ->
+                            "${saved.photos.size} photos ignored (scope ${saved.accessScope} ≠ $access)"
+                        else -> {
+                            val n = saved.photos.count { it.embedding != null }
+                            "${saved.photos.size} photos, $n with embeddings"
+                        }
+                    },
+                )
+
                 // 1. Metadata scan (seconds) — fresh objects, embeddings null.
-                val scanned = indexer.scan()
+                scanned = indexer.scan()
+                Diagnostics.log("scan: ${scanned.size} photos found")
 
                 // 2. Carry saved embeddings onto the fresh scan by photo id.
                 val merged = scanned.map { fresh ->
@@ -115,10 +151,16 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     fresh
                 }
+                val ready = merged.count { it.embedding != null }
+                Diagnostics.log(
+                    "merge: ${merged.size} photos, $ready embeddings carried over, " +
+                        "${merged.size - ready} to embed",
+                )
 
                 // 3. Persist immediately — from here on the app survives
                 //    being killed without losing the scan.
                 repository.saveIndex(indexFile(merged, access.name))
+                Diagnostics.log("index: scan checkpoint saved")
 
                 // 4. Usable NOW.
                 enterReady(merged)
@@ -127,20 +169,36 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
                 //    persist partial progress AND refresh the Ready state so
                 //    the UI sees embeddings fill in live.
                 if (merged.any { it.embedding == null }) {
-                    val active = acquireEngine() ?: return@launch
-                    indexer.embedMissing(merged, active) { checkpoint ->
-                        repository.saveIndex(indexFile(checkpoint, access.name))
-                        enterReady(checkpoint)
+                    Diagnostics.log("embed: starting background pass")
+                    val active = acquireEngine()
+                    if (active == null) {
+                        Diagnostics.log("embed: SKIPPED — engine unavailable (see engine line above)")
+                    } else {
+                        indexer.embedMissing(merged, active) { checkpoint ->
+                            val done = checkpoint.count { it.embedding != null }
+                            repository.saveIndex(indexFile(checkpoint, access.name))
+                            Diagnostics.log("checkpoint: $done/${merged.size} embedded — saved")
+                            enterReady(checkpoint)
+                        }
+                        // Final persist (covers the tail after the last checkpoint).
+                        repository.saveIndex(indexFile(merged, access.name))
+                        val done = merged.count { it.embedding != null }
+                        Diagnostics.log("embed: finished — $done/${merged.size} embedded (saved)")
+                        enterReady(merged)
                     }
-                    // Final persist (covers the tail after the last checkpoint).
-                    repository.saveIndex(indexFile(merged, access.name))
-                    enterReady(merged)
+                } else {
+                    Diagnostics.log("embed: nothing to do — all photos embedded")
                 }
             } catch (e: CancellationException) {
                 throw e // permission revoked / VM cleared mid-run
             } catch (e: Exception) {
+                Diagnostics.failure("indexing", e)
                 Log.e(TAG, "indexing failed", e)
-                _stage.value = AppStage.NeedAccess
+                // DIAGNOSTIC BUILD: never drop to NeedAccess (that hides the
+                // diag panel and looks like a permission problem). Land in
+                // Ready with whatever we have — worst case an empty grid
+                // plus the recorded failure.
+                enterReady(scanned)
             }
         }
     }
@@ -175,28 +233,41 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
         val metadataMatches = photos.matchingMetadata(trimmed)
         val embedded = photos.filter { it.embedding != null }
         if (embedded.isEmpty()) {
+            logRankThrottled(
+                "rank \"$trimmed\": METADATA-ONLY — 0 of ${photos.size} photos embedded, " +
+                    "${metadataMatches.size} metadata matches",
+            )
             onResult(metadataMatches)
             return
         }
         queryJob = viewModelScope.launch(Dispatchers.Default) {
             val active = acquireEngine()
-            val results = if (active == null) {
+            if (active == null) {
+                logRankThrottled(
+                    "rank \"$trimmed\": METADATA-ONLY — engine unavailable, " +
+                        "${metadataMatches.size} metadata matches",
+                )
+                onResult(metadataMatches)
+                return@launch
+            }
+            val results = try {
+                val qvec = active.encodeText(trimmed)
+                val scored = embedded.map { p -> p to active.dot(qvec, p.embedding!!) }
+                val ranked = scored.sortedByDescending { it.second }.map { it.first }
+                val rankedIds = ranked.mapTo(HashSet()) { it.id }
+                val appended = metadataMatches.filter { it.id !in rankedIds }
+                logRankThrottled(
+                    "rank \"$trimmed\": SEMANTIC over ${embedded.size} embedded " +
+                        "(top score ${scored.maxOfOrNull { it.second }}, " +
+                        "${appended.size} metadata appended)",
+                )
+                ranked + appended
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Diagnostics.failure("rank \"$trimmed\"", e)
+                Log.w(TAG, "semantic ranking failed; metadata fallback", e)
                 metadataMatches
-            } else {
-                try {
-                    val qvec = active.encodeText(trimmed)
-                    val ranked = embedded
-                        .map { p -> p to active.dot(qvec, p.embedding!!) }
-                        .sortedByDescending { it.second }
-                        .map { it.first }
-                    val rankedIds = ranked.mapTo(HashSet()) { it.id }
-                    ranked + metadataMatches.filter { it.id !in rankedIds }
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    Log.w(TAG, "semantic ranking failed; metadata fallback", e)
-                    metadataMatches
-                }
             }
             onResult(results)
         }
@@ -206,21 +277,35 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun acquireEngine(): ClipOnnxEngine? = engineMutex.withLock {
         engine?.let { return it }
         if (engineFailed) return null
+        Diagnostics.log("engine: loading CLIP (extract ~155 MB assets + 2 sessions)…")
+        val t0 = System.currentTimeMillis()
         withContext(Dispatchers.IO) {
             runCatching { ClipOnnxEngine.fromContext(getApplication()) }
-                .onSuccess { engine = it }
+                .onSuccess {
+                    engine = it
+                    Diagnostics.log(
+                        "engine: OK in ${System.currentTimeMillis() - t0} ms (dim ${it.embedDim})",
+                    )
+                }
                 .onFailure {
                     engineFailed = true
-                    Log.w(TAG, "CLIP engine unavailable: ${it.message}")
+                    Diagnostics.failure("engine load", it)
+                    Log.w(TAG, "CLIP engine unavailable", it)
                 }
                 .getOrNull()
         }
     }
 
-    private var engineFailed = false
-
     /** Latest indexed photo list, for the UI's ranking calls. */
     fun currentPhotosSnapshot(): List<PhotoMetadata> = currentPhotos
+
+    private fun logRankThrottled(line: String) {
+        val now = System.currentTimeMillis()
+        if (now - lastRankLogMs >= RANK_LOG_INTERVAL_MS) {
+            lastRankLogMs = now
+            Diagnostics.log(line)
+        }
+    }
 
     private fun closeEngine() {
         engine?.close()
@@ -236,5 +321,7 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
 
     private companion object {
         const val TAG = "GalleryViewModel"
+
+        const val RANK_LOG_INTERVAL_MS = 1_500L
     }
 }

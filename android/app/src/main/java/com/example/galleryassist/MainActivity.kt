@@ -5,12 +5,18 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.example.galleryassist.ui.DiagnosticsPanel
 import com.example.galleryassist.ui.IndexingScreen
 import com.example.galleryassist.ui.PhotoAccessScreen
 import com.example.galleryassist.ui.SearchScreen
@@ -60,13 +66,22 @@ private fun AppRoot(viewModel: GalleryViewModel) {
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    when (val s = stage) {
-        AppStage.NeedAccess -> PhotoAccessScreen(onGranted = { viewModel.onPermissionChanged() })
-        AppStage.Indexing -> IndexingScreen(progress = viewModel.indexingProgress.collectAsStateWithLifecycle().value)
-        is AppStage.Ready -> SearchScreen(
-            photos = s.photos,
-            aiProgress = viewModel.indexingProgress.collectAsStateWithLifecycle().value,
-            onRank = { query, onResult -> viewModel.rank(query, viewModel.currentPhotosSnapshot(), onResult) },
+    // DIAGNOSTIC BUILD (v0.2.2): the diag panel overlays EVERY stage —
+    // including NeedAccess and Indexing — so a failure that would previously
+    // hide the app behind the permission screen is still readable in-app.
+    Box(Modifier.fillMaxSize()) {
+        when (val s = stage) {
+            AppStage.NeedAccess -> PhotoAccessScreen(onGranted = { viewModel.onPermissionChanged() })
+            AppStage.Indexing -> IndexingScreen(progress = viewModel.indexingProgress.collectAsStateWithLifecycle().value)
+            is AppStage.Ready -> SearchScreen(
+                photos = s.photos,
+                aiProgress = viewModel.indexingProgress.collectAsStateWithLifecycle().value,
+                onRank = { query, onResult -> viewModel.rank(query, viewModel.currentPhotosSnapshot(), onResult) },
+            )
+        }
+        DiagnosticsPanel(
+            diag = viewModel.diag,
+            modifier = Modifier.fillMaxSize().padding(top = 48.dp),
         )
     }
 }

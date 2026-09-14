@@ -120,10 +120,20 @@ class PhotoRepository(private val context: Context) {
         }
     }
 
-    fun loadIndex(): IndexFile? {
+    /**
+     * Loads the persisted index, or null when absent/unusable. [onError]
+     * receives full parse/IO detail (DIAGNOSTIC BUILD) so a corrupt index is
+     * distinguishable from "first run" — previously both were a silent null.
+     */
+    fun loadIndex(onError: (String) -> Unit = {}): IndexFile? {
         val file = File(File(context.filesDir, "index"), "photo_index.json")
         if (!file.exists()) return null
-        return runCatching { json.decodeFromString(IndexFile.serializer(), file.readText()) }.getOrNull()
+        return try {
+            json.decodeFromString(IndexFile.serializer(), file.readText())
+        } catch (e: Exception) {
+            onError("${e::class.java.simpleName}: ${e.message} (file ${file.length()} bytes)")
+            null
+        }
     }
 
     private val json = Json { ignoreUnknownKeys = true }

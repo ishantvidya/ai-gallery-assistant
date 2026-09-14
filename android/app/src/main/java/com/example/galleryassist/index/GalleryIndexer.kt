@@ -5,6 +5,7 @@ import android.net.Uri
 import android.util.Log
 import com.example.galleryassist.data.PhotoMetadata
 import com.example.galleryassist.data.PhotoRepository
+import com.example.galleryassist.diag.Diagnostics
 import com.example.galleryassist.ml.EmbeddingEngine
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
@@ -70,6 +71,7 @@ class GalleryIndexer(
         onCheckpoint: suspend (List<PhotoMetadata>) -> Unit = {},
     ): List<PhotoMetadata> = withContext(Dispatchers.IO) {
         val pending = photos.filter { it.embedding == null }
+        Diagnostics.log("embed pass: ${pending.size} photos pending")
         _progress.value = IndexingProgress(
             phase = IndexingProgress.Phase.EMBEDDING,
             processed = 0,
@@ -82,17 +84,44 @@ class GalleryIndexer(
 
         processed.set(0)
         var sinceCheckpoint = 0
+        // DIAGNOSTIC BUILD: per-photo failures are silently skipped today;
+        // count them and keep the first failure's detail for the diag panel.
+        var decodeFailures = 0
+        var embedFailures = 0
+        var firstFailure: String? = null
         for (photo in pending) {
             currentCoroutineContext().ensureActive() // cooperative cancel
             if (cancelled.get()) break
 
+            var decodeThrew = false
             val bmp: Bitmap? = runCatching {
                 repository.decodeThumbnail(Uri.parse(photo.contentUri))
+            }.onFailure {
+                decodeThrew = true
+                decodeFailures++
+                if (firstFailure == null) {
+                    firstFailure = "decode id=${photo.id}: ${it::class.java.simpleName}: ${it.message}"
+                }
+                Log.w(TAG, "decode failed for ${photo.id}", it)
             }.getOrNull()
+            if (bmp == null && !decodeThrew) {
+                // decodeThumbnail returned null without throwing (null stream /
+                // bad bounds) — that's a failure too, not "nothing to do".
+                decodeFailures++
+                if (firstFailure == null) {
+                    firstFailure = "decode id=${photo.id}: decoder returned null"
+                }
+            }
             if (bmp != null) {
                 runCatching { engine.embedImage(bmp) }
                     .onSuccess { photo.embedding = it }
-                    .onFailure { Log.w(TAG, "embed failed for ${photo.id}", it) }
+                    .onFailure {
+                        embedFailures++
+                        if (firstFailure == null) {
+                            firstFailure = "embed id=${photo.id}: ${it::class.java.simpleName}: ${it.message}"
+                        }
+                        Log.w(TAG, "embed failed for ${photo.id}", it)
+                    }
                 bmp.recycle()
             }
 
@@ -101,10 +130,20 @@ class GalleryIndexer(
             _progress.value = _progress.value.copy(processed = n)
             if (sinceCheckpoint >= CHECKPOINT_EVERY) {
                 sinceCheckpoint = 0
+                Diagnostics.log(
+                    "checkpoint: ${processed.get()}/${pending.size} processed " +
+                        "($decodeFailures decode fails, $embedFailures embed fails)",
+                )
                 onCheckpoint(photos)
             }
         }
         if (sinceCheckpoint > 0) onCheckpoint(photos)
+
+        Diagnostics.log(
+            "embed pass done: ${pending.size} attempted, ${decodeFailures} decode " +
+                "failures, ${embedFailures} embed failures" +
+                (firstFailure?.let { " — first: $it" } ?: ""),
+        )
 
         _progress.value = _progress.value.copy(phase = IndexingProgress.Phase.DONE)
         photos
