@@ -87,11 +87,10 @@
     </div>
 
     <div class="cta">
-      <!-- TODO(repo owner): replace OWNER/REPO with the GitHub owner/repo -->
-      <a class="btn btn-primary" href="https://github.com/OWNER/REPO/releases/latest/download/gallery-assist.apk">Download APK</a>
-      <a class="btn btn-ghost" href="https://github.com/OWNER/REPO">View source</a>
+      <a class="btn btn-primary" href="https://github.com/ishantvidya/ai-gallery-assistant/releases/latest/download/gallery-assist.apk">Download APK</a>
+      <a class="btn btn-ghost" href="https://github.com/ishantvidya/ai-gallery-assistant">View source</a>
     </div>
-    <p class="small">Android 8.0+ · ~XX MB · includes the on-device AI model · no account, no tracking</p>
+    <p class="small">Android 8.0+ · ~134 MB · no account, no tracking</p>
   </div>
 
   <section>
@@ -101,7 +100,8 @@
         <p>There is no server. All AI inference happens on-device with ONNX Runtime — the app has no
            network permission at all.</p></div>
       <div class="card"><h3>⚡ Works offline</h3>
-        <p>After install, search works with airplane mode on. The model ships inside the app.</p></div>
+        <p>The app has no network permission at all. Once photos are indexed, browsing works with
+           airplane mode on. Semantic search unlocks once the CLIP model is on the device.</p></div>
       <div class="card"><h3>🧠 Real CLIP intelligence</h3>
         <p>A quantized CLIP vision-language model understands scenes, objects and concepts —
            not just filenames.</p></div>
@@ -116,8 +116,10 @@
       <li><b>Download</b> the APK using the button above.</li>
       <li><b>Open it.</b> Android will warn about installing from your browser — tap
           <b>“Install anyway”</b> (this appears because the app isn’t from a store).</li>
-      <li><b>Open the app</b> and pick some photos with the built-in picker.</li>
-      <li><b>Type what you remember.</b> The photos are indexed on your phone — then search away.</li>
+      <li><b>Open the app</b> and allow photo access. Your gallery is indexed on the phone
+          (names, albums, dates) in seconds.</li>
+      <li><b>Browse the grid.</b> Semantic “describe it to find it” search activates once the
+          CLIP model is provisioned on the device (developer setup for now).</li>
     </ol>
     <p class="small">Updating: download the new APK and install it over the old version — your data stays.</p>
   </section>
@@ -133,7 +135,7 @@
 
   <footer>
     AI Gallery Assistant — on-device CLIP (ViT-B/32, quantized) via ONNX Runtime.
-    Built with Kotlin + Jetpack Compose. © 2026 · <a style="color:var(--muted)" href="https://github.com/OWNER/REPO">GitHub</a>
+    Built with Kotlin + Jetpack Compose. © 2026 · <a style="color:var(--muted)" href="https://github.com/ishantvidya/ai-gallery-assistant">GitHub</a>
   </footer>
 </div>
 </body>
