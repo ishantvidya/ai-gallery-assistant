@@ -10,7 +10,6 @@ import com.example.galleryassist.data.matchingMetadata
 import com.example.galleryassist.index.GalleryIndexer
 import com.example.galleryassist.index.IndexingProgress
 import com.example.galleryassist.ml.ClipOnnxEngine
-import com.example.galleryassist.ml.EmbeddingEngine
 import com.example.galleryassist.permissions.PhotoAccess
 import com.example.galleryassist.permissions.PhotoPermissions
 import kotlinx.coroutines.CancellationException
@@ -19,30 +18,39 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
-/** Overall app state shown by MainActivity's router. */
+/** Overall app stage shown by MainActivity's router. */
 sealed interface AppStage {
     /** No photo permission (or revoked) → setup/rationale screen. */
     data object NeedAccess : AppStage
 
-    /** Permission granted; photos discovered; ready to search. */
-    data class Ready(val photos: List<PhotoMetadata>) : AppStage
+    /** Photos discovered; grid + search usable (embedding may still run). */
+    data class Ready(
+        val photos: List<PhotoMetadata>,
+        /** Bumped on every checkpoint so the UI recomposes as embeddings
+         *  fill in (StateFlow dedupes content-equal values). */
+        val version: Int = 0,
+    ) : AppStage
 
-    /** Indexing in progress. */
+    /** First-run metadata scan in progress (seconds). */
     data object Indexing : AppStage
 }
 
 /**
- * Owns the permission → index → search lifecycle, and the CLIP engine used
- * for both indexing (image tower) and search (text tower).
+ * Owns the permission → scan → search lifecycle, plus the CLIP engine for
+ * indexing (image tower) and search (text tower).
  *
- * Re-index triggers:
- *  - first grant,
- *  - app restart with no saved index,
- *  - access-scope change (FULL ⇄ PARTIAL, or revoked → re-grant) detected by
- *    comparing the saved index's scope with the current one,
- *  - saved index lacking embeddings (older build) → backfill pass only.
+ * Design (v0.2.1): the app is usable IMMEDIATELY after a fast metadata scan.
+ * CLIP embedding then runs as a background job with checkpoints persisted
+ * every [GalleryIndexer.CHECKPOINT_EVERY] photos, so closing the app loses at
+ * most one checkpoint's work — the next launch RESUMES from the saved index.
+ *
+ * Re-scan triggers: first grant, scope change (FULL ⇄ PARTIAL / revoke →
+ * re-grant), and every app open (picks up new/removed photos; saved
+ * embeddings are carried over by photo id, so completed work is never redone).
  */
 class GalleryViewModel(app: Application) : AndroidViewModel(app) {
 
@@ -54,48 +62,108 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
 
     val indexingProgress: StateFlow<IndexingProgress> = indexer.progress
 
-    /** Current [PhotoMetadata] list (kept for ranking on query changes). */
+    /** Latest photo list (for the UI's ranking calls). */
     private var currentPhotos: List<PhotoMetadata> = emptyList()
 
-    /**
-     * The CLIP engine is kept alive while in [AppStage.Ready] so text queries
-     * can be encoded without paying the ~1-2 s session load per keystroke.
-     * Closed when leaving Ready (permission revoked, VM cleared).
-     */
+    /** Bumped whenever a new Ready generation starts; guards stale updates. */
+    private var readyGeneration = 0
+
+    /** Shared engine for background embedding + query encoding. */
     private var engine: ClipOnnxEngine? = null
-    private var queryJob: Job? = null
+    private val engineMutex = Mutex()
+
     private var indexJob: Job? = null
+    private var queryJob: Job? = null
 
     /** Called by the UI after the user grants (or changes) photo access. */
     fun onPermissionChanged() {
         val access = PhotoPermissions.currentAccess(getApplication())
         if (access == PhotoAccess.NONE) {
             indexJob?.cancel()
+            queryJob?.cancel()
             closeEngine()
             _stage.value = AppStage.NeedAccess
             return
         }
-        if (_stage.value is AppStage.Indexing) return // already running
+        if (_stage.value is AppStage.Indexing) return // scan already running
 
-        val saved = repository.loadIndex()
-        val scopeChanged = saved != null && saved.accessScope != access.name
-        val hasEmbeddings = saved?.photos?.isNotEmpty() == true &&
-            saved.photos.all { it.embedding != null }
-        val needsIndex = saved == null || scopeChanged
-
-        when {
-            needsIndex -> startIndexing(access)
-            !hasEmbeddings -> backfillEmbeddings(access, saved!!.photos)
-            else -> enterReady(saved!!.photos)
-        }
-        // TODO(M2): also re-index when MediaStore content changes (ContentObserver).
+        indexJob?.cancel()
+        startLifecycle(access)
     }
 
     /**
-     * Ranks photos for [query] against their stored CLIP embeddings
-     * (dot product == cosine; both towers emit unit vectors), descending.
-     * Falls back to metadata matching when embeddings aren't available yet,
-     * and degrades gracefully to metadata if the engine can't be loaded.
+     * Fast path: scan → save → Ready, then embed what's missing in the
+     * background (resuming any interrupted session from the saved index).
+     */
+    private fun startLifecycle(access: PhotoAccess) {
+        _stage.value = AppStage.Indexing
+        val savedById = repository.loadIndex()
+            ?.takeIf { it.accessScope == access.name }
+            ?.photos
+            ?.associateBy { it.id }
+            ?: emptyMap()
+
+        indexJob = viewModelScope.launch {
+            try {
+                // 1. Metadata scan (seconds) — fresh objects, embeddings null.
+                val scanned = indexer.scan()
+
+                // 2. Carry saved embeddings onto the fresh scan by photo id.
+                val merged = scanned.map { fresh ->
+                    savedById[fresh.id]?.embedding?.let { saved ->
+                        fresh.embedding = saved
+                    }
+                    fresh
+                }
+
+                // 3. Persist immediately — from here on the app survives
+                //    being killed without losing the scan.
+                repository.saveIndex(indexFile(merged, access.name))
+
+                // 4. Usable NOW.
+                enterReady(merged)
+
+                // 5. Embed what's missing in the background, checkpointing:
+                //    persist partial progress AND refresh the Ready state so
+                //    the UI sees embeddings fill in live.
+                if (merged.any { it.embedding == null }) {
+                    val active = acquireEngine() ?: return@launch
+                    indexer.embedMissing(merged, active) { checkpoint ->
+                        repository.saveIndex(indexFile(checkpoint, access.name))
+                        enterReady(checkpoint)
+                    }
+                    // Final persist (covers the tail after the last checkpoint).
+                    repository.saveIndex(indexFile(merged, access.name))
+                    enterReady(merged)
+                }
+            } catch (e: CancellationException) {
+                throw e // permission revoked / VM cleared mid-run
+            } catch (e: Exception) {
+                Log.e(TAG, "indexing failed", e)
+                _stage.value = AppStage.NeedAccess
+            }
+        }
+    }
+
+    private fun indexFile(photos: List<PhotoMetadata>, scope: String) =
+        PhotoRepository.IndexFile(
+            lastIndexedEpochMs = System.currentTimeMillis(),
+            photos = photos,
+            accessScope = scope,
+        )
+
+    private fun enterReady(photos: List<PhotoMetadata>) {
+        currentPhotos = photos
+        readyGeneration++
+        _stage.value = AppStage.Ready(photos, readyGeneration)
+    }
+
+    /**
+     * Ranks [photos] for [query]: photos with embeddings are ordered by cosine
+     * similarity to the query (on-device text tower); metadata matches without
+     * embeddings are appended after (and serve as the only results while
+     * embedding is still running). Metadata matches rank first when the query
+     * looks like a filename/album/date anyway.
      */
     fun rank(query: String, photos: List<PhotoMetadata>, onResult: (List<PhotoMetadata>) -> Unit) {
         queryJob?.cancel()
@@ -104,111 +172,55 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
             onResult(photos)
             return
         }
+        val metadataMatches = photos.matchingMetadata(trimmed)
         val embedded = photos.filter { it.embedding != null }
         if (embedded.isEmpty()) {
-            onResult(photos.matchingMetadata(trimmed))
+            onResult(metadataMatches)
             return
         }
         queryJob = viewModelScope.launch(Dispatchers.Default) {
-            val active = engine ?: createEngine()
+            val active = acquireEngine()
             val results = if (active == null) {
-                photos.matchingMetadata(trimmed)
+                metadataMatches
             } else {
-                withContext(Dispatchers.Default) {
-                    try {
-                        val qvec = active.encodeText(trimmed)
-                        embedded
-                            .map { p -> p to active.dot(qvec, p.embedding!!) }
-                            .sortedByDescending { it.second }
-                            .map { it.first }
-                    } catch (e: CancellationException) {
-                        throw e
-                    } catch (e: Exception) {
-                        Log.w(TAG, "semantic ranking failed; falling back to metadata", e)
-                        photos.matchingMetadata(trimmed)
-                    }
+                try {
+                    val qvec = active.encodeText(trimmed)
+                    val ranked = embedded
+                        .map { p -> p to active.dot(qvec, p.embedding!!) }
+                        .sortedByDescending { it.second }
+                        .map { it.first }
+                    val rankedIds = ranked.mapTo(HashSet()) { it.id }
+                    ranked + metadataMatches.filter { it.id !in rankedIds }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w(TAG, "semantic ranking failed; metadata fallback", e)
+                    metadataMatches
                 }
             }
             onResult(results)
         }
     }
 
-    private suspend fun createEngine(): ClipOnnxEngine? =
+    /** Loads the engine once; later callers share the same instance. */
+    private suspend fun acquireEngine(): ClipOnnxEngine? = engineMutex.withLock {
+        engine?.let { return it }
+        if (engineFailed) return null
         withContext(Dispatchers.IO) {
             runCatching { ClipOnnxEngine.fromContext(getApplication()) }
                 .onSuccess { engine = it }
-                .onFailure { Log.w(TAG, "CLIP engine unavailable: ${it.message}") }
+                .onFailure {
+                    engineFailed = true
+                    Log.w(TAG, "CLIP engine unavailable: ${it.message}")
+                }
                 .getOrNull()
         }
-
-    private fun enterReady(photos: List<PhotoMetadata>) {
-        currentPhotos = photos
-        _stage.value = AppStage.Ready(photos)
     }
+
+    private var engineFailed = false
 
     /** Latest indexed photo list, for the UI's ranking calls. */
     fun currentPhotosSnapshot(): List<PhotoMetadata> = currentPhotos
-
-    private fun startIndexing(access: PhotoAccess) {
-        _stage.value = AppStage.Indexing
-        indexJob = viewModelScope.launch {
-            val active = createEngine()
-            try {
-                val photos = indexer.indexAll(active)
-                repository.saveIndex(
-                    PhotoRepository.IndexFile(
-                        lastIndexedEpochMs = System.currentTimeMillis(),
-                        photos = photos,
-                        accessScope = access.name,
-                    ),
-                )
-                enterReady(photos)
-            } catch (e: CancellationException) {
-                // Indexing cancelled (permission revoked mid-run / VM cleared):
-                // rethrow so structured concurrency stays intact.
-                throw e
-            } catch (e: Exception) {
-                _stage.value = AppStage.NeedAccess
-            } finally {
-                if (active != null && _stage.value !is AppStage.Ready) active.close()
-            }
-        }
-    }
-
-    /**
-     * Older index (v0.1.x) has metadata but no embeddings: scan the same
-     * photo list, embed what's still visible, keep everything else.
-     */
-    private fun backfillEmbeddings(access: PhotoAccess, saved: List<PhotoMetadata>) {
-        _stage.value = AppStage.Indexing
-        indexJob = viewModelScope.launch {
-            val active = createEngine()
-            try {
-                if (active == null) {
-                    enterReady(saved)
-                    return@launch
-                }
-                val byId = saved.associateBy { it.id }
-                val fresh = indexer.indexAll(active).map { hit ->
-                    // Newly embedded photos win; photos that dropped out of
-                    // MediaStore since last time keep their old record.
-                    if (hit.embedding != null) hit else byId[hit.id] ?: hit
-                }
-                repository.saveIndex(
-                    PhotoRepository.IndexFile(
-                        lastIndexedEpochMs = System.currentTimeMillis(),
-                        photos = fresh,
-                        accessScope = access.name,
-                    ),
-                )
-                enterReady(fresh)
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                _stage.value = AppStage.Ready(saved)
-            }
-        }
-    }
 
     private fun closeEngine() {
         engine?.close()
@@ -216,6 +228,7 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     override fun onCleared() {
+        indexJob?.cancel()
         queryJob?.cancel()
         closeEngine()
         super.onCleared()

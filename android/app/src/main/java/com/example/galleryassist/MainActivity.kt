@@ -65,6 +65,7 @@ private fun AppRoot(viewModel: GalleryViewModel) {
         AppStage.Indexing -> IndexingScreen(progress = viewModel.indexingProgress.collectAsStateWithLifecycle().value)
         is AppStage.Ready -> SearchScreen(
             photos = s.photos,
+            aiProgress = viewModel.indexingProgress.collectAsStateWithLifecycle().value,
             onRank = { query, onResult -> viewModel.rank(query, viewModel.currentPhotosSnapshot(), onResult) },
         )
     }

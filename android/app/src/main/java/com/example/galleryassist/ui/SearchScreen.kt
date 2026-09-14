@@ -30,6 +30,7 @@ import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
 import com.example.galleryassist.data.PhotoMetadata
 import com.example.galleryassist.data.matchingMetadata
+import com.example.galleryassist.index.IndexingProgress
 import kotlinx.coroutines.delay
 
 /**
@@ -46,6 +47,7 @@ import kotlinx.coroutines.delay
 @Composable
 fun SearchScreen(
     photos: List<PhotoMetadata>,
+    aiProgress: IndexingProgress,
     onRank: (query: String, onResult: (List<PhotoMetadata>) -> Unit) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -74,6 +76,8 @@ fun SearchScreen(
 
     val display = semanticResults ?: metaResults
     val embeddedCount = remember(photos) { photos.count { it.embedding != null } }
+    val aiRunning = aiProgress.phase == IndexingProgress.Phase.EMBEDDING &&
+        aiProgress.total > 0
 
     Column(modifier = modifier.fillMaxSize().padding(16.dp)) {
         OutlinedTextField(
@@ -96,7 +100,12 @@ fun SearchScreen(
         Spacer(Modifier.height(8.dp))
         Card {
             Column(Modifier.padding(12.dp)) {
-                if (embeddedCount > 0) {
+                if (aiRunning) {
+                    Text(
+                        "AI is learning your gallery: ${aiProgress.processed}/${aiProgress.total} photos embedded — keep the app open; progress is saved and resumes if interrupted.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                } else if (embeddedCount > 0) {
                     Text(
                         "AI search is on — describe what's in the photo (\"bed\", \"human\", \"sunset\").",
                         style = MaterialTheme.typography.bodySmall,
@@ -111,7 +120,7 @@ fun SearchScreen(
                         style = MaterialTheme.typography.bodySmall,
                     )
                     Text(
-                        "AI \"describe it to find it\" search activates after the next re-index (photos are being embedded).",
+                        "AI search will activate once photos have been embedded (open the app and keep it in the foreground to let it run).",
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }

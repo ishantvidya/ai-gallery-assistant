@@ -15,24 +15,23 @@ import kotlinx.coroutines.withContext
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
-/** User-visible indexing progress. */
+/** User-visible indexing/embedding progress. */
 data class IndexingProgress(
     val phase: Phase = Phase.SCANNING,
     val processed: Int = 0,
     val total: Int = 0,
 ) {
     enum class Phase { SCANNING, EMBEDDING, DONE }
-
-    val photoCount: Int get() = total
 }
 
 /**
- * Builds the searchable index: MediaStore scan → metadata persisted →
- * (optional) embedding pass.
+ * Builds the searchable index in two independent stages:
  *
- * Deliberately modular per the plan: the embed pass depends only on
- * [EmbeddingEngine]; if no model is available yet (M1 state), indexing still
- * completes and persists metadata, so M2/M3 work slots in cleanly.
+ *  1. [scan] — MediaStore metadata (fast, seconds) → UI is usable immediately.
+ *  2. [embedMissing] — CLIP pass over photos lacking embeddings, with
+ *     **checkpointing**: [onCheckpoint] fires every [CHECKPOINT_EVERY] photos
+ *     so the ViewModel can persist partial progress. An interrupted pass
+ *     resumes where it stopped instead of starting over.
  */
 class GalleryIndexer(
     private val repository: PhotoRepository,
@@ -45,41 +44,67 @@ class GalleryIndexer(
     private val processed = AtomicInteger(0)
 
     /**
-     * Runs a full scan (+ embed pass when [engine] != null) off the main thread.
-     * Returns the discovered metadata; safe to call from a coroutine only.
+     * Discovers what MediaStore exposes under the current permission scope.
+     * Cheap (metadata only) — call before/while embedding.
      */
-    suspend fun indexAll(engine: EmbeddingEngine?): List<PhotoMetadata> = withContext(Dispatchers.IO) {
+    suspend fun scan(): List<PhotoMetadata> = withContext(Dispatchers.IO) {
         cancelled.set(false)
         processed.set(0)
         _progress.value = IndexingProgress(phase = IndexingProgress.Phase.SCANNING)
+        repository.queryPhotos()
+    }
 
-        // 1. Discover what MediaStore exposes under the current permission scope.
-        val photos = repository.queryPhotos()
-        _progress.value = _progress.value.copy(
+    /**
+     * Embeds every photo in [photos] whose embedding is null, writing results
+     * back into the list's [PhotoMetadata.embedding] (objects are mutated in
+     * place; [photos] order is preserved).
+     *
+     * [onCheckpoint] fires after every [CHECKPOINT_EVERY] embedded photo and
+     * once more at the end, so callers can persist incremental progress.
+     * Cancellation (permission revoked / app backgrounded) stops cleanly at
+     * the next photo boundary — completed work is kept by the caller.
+     */
+    suspend fun embedMissing(
+        photos: List<PhotoMetadata>,
+        engine: EmbeddingEngine,
+        onCheckpoint: suspend (List<PhotoMetadata>) -> Unit = {},
+    ): List<PhotoMetadata> = withContext(Dispatchers.IO) {
+        val pending = photos.filter { it.embedding == null }
+        _progress.value = IndexingProgress(
             phase = IndexingProgress.Phase.EMBEDDING,
-            total = photos.size,
+            processed = 0,
+            total = pending.size,
         )
+        if (pending.isEmpty()) {
+            _progress.value = _progress.value.copy(phase = IndexingProgress.Phase.DONE)
+            return@withContext photos
+        }
 
-        // 2. (Persistence is the caller's job: it knows the permission scope.)
+        processed.set(0)
+        var sinceCheckpoint = 0
+        for (photo in pending) {
+            currentCoroutineContext().ensureActive() // cooperative cancel
+            if (cancelled.get()) break
 
-        // 3. Embedding pass — skipped entirely when no engine is provided.
-        //    Results are written back into each PhotoMetadata.embedding so the
-        //    caller persists them with the metadata in one file.
-        if (engine != null) {
-            for (photo in photos) {
-                currentCoroutineContext().ensureActive() // cooperative cancel on revoke/exit
-                if (cancelled.get()) break
-                val bmp: Bitmap? = repository.decodeThumbnail(Uri.parse(photo.contentUri))
-                if (bmp != null) {
-                    runCatching { engine.embedImage(bmp) }
-                        .onSuccess { photo.embedding = it }
-                        .onFailure { Log.w(TAG, "embed failed for ${photo.id}", it) }
-                    bmp.recycle()
-                }
-                val n = processed.incrementAndGet()
-                _progress.value = _progress.value.copy(processed = n)
+            val bmp: Bitmap? = runCatching {
+                repository.decodeThumbnail(Uri.parse(photo.contentUri))
+            }.getOrNull()
+            if (bmp != null) {
+                runCatching { engine.embedImage(bmp) }
+                    .onSuccess { photo.embedding = it }
+                    .onFailure { Log.w(TAG, "embed failed for ${photo.id}", it) }
+                bmp.recycle()
+            }
+
+            val n = processed.incrementAndGet()
+            sinceCheckpoint++
+            _progress.value = _progress.value.copy(processed = n)
+            if (sinceCheckpoint >= CHECKPOINT_EVERY) {
+                sinceCheckpoint = 0
+                onCheckpoint(photos)
             }
         }
+        if (sinceCheckpoint > 0) onCheckpoint(photos)
 
         _progress.value = _progress.value.copy(phase = IndexingProgress.Phase.DONE)
         photos
@@ -91,5 +116,8 @@ class GalleryIndexer(
 
     private companion object {
         const val TAG = "GalleryIndexer"
+
+        /** Persist partial progress every N embedded photos. */
+        const val CHECKPOINT_EVERY = 50
     }
 }
