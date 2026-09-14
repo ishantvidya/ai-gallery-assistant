@@ -2,6 +2,9 @@ package com.example.galleryassist.ml
 
 import android.content.Context
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.int
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.util.Locale
@@ -175,12 +178,12 @@ class ClipTokenizer private constructor(
          * only when the bundled tokenizer is known to exist.
          */
         fun fromAssets(context: Context, assetDir: String = "tokenizer"): ClipTokenizer {
-            val mapSerializer = kotlinx.serialization.builtins.MapSerializer(
-                kotlinx.serialization.builtins.serializer(),
-                kotlinx.serialization.builtins.serializer(),
-            )
-            val vocab: Map<String, Int> = context.assets.open("$assetDir/clip-vocab.json").use { stream ->
-                Json.decodeFromString(mapSerializer, stream.readBytes().decodeToString())
+            val vocab = HashMap<String, Int>(80_000)
+            context.assets.open("$assetDir/clip-vocab.json").use { stream ->
+                val obj = Json.parseToJsonElement(stream.readBytes().decodeToString()).jsonObject
+                for ((token, idValue) in obj) {
+                    vocab[token] = idValue.jsonPrimitive.int
+                }
             }
             val ranks = HashMap<Pair<String, String>, Int>(50_000)
             context.assets.open("$assetDir/clip-merges.txt").use { stream ->

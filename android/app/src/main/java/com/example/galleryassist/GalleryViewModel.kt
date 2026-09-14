@@ -64,6 +64,7 @@ class GalleryViewModel(app: Application) : AndroidViewModel(app) {
      */
     private var engine: ClipOnnxEngine? = null
     private var queryJob: Job? = null
+    private var indexJob: Job? = null
 
     /** Called by the UI after the user grants (or changes) photo access. */
     fun onPermissionChanged() {
