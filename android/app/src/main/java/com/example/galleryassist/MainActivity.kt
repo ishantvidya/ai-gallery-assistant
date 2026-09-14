@@ -1,5 +1,6 @@
 package com.example.galleryassist
 
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -16,6 +17,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.example.galleryassist.diag.Diagnostics
 import com.example.galleryassist.ui.DiagnosticsPanel
 import com.example.galleryassist.ui.IndexingScreen
 import com.example.galleryassist.ui.PhotoAccessScreen
@@ -41,6 +43,11 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        // DIAGNOSTIC BUILD: first diag line identifies the device.
+        Diagnostics.log(
+            "device: ${Build.MANUFACTURER} ${Build.MODEL} · " +
+                "Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})",
+        )
         setContent {
             GalleryAssistTheme {
                 AppRoot(viewModel)

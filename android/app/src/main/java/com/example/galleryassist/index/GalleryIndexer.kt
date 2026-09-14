@@ -7,6 +7,7 @@ import com.example.galleryassist.data.PhotoMetadata
 import com.example.galleryassist.data.PhotoRepository
 import com.example.galleryassist.diag.Diagnostics
 import com.example.galleryassist.ml.EmbeddingEngine
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -60,10 +61,14 @@ class GalleryIndexer(
      * back into the list's [PhotoMetadata.embedding] (objects are mutated in
      * place; [photos] order is preserved).
      *
-     * [onCheckpoint] fires after every [CHECKPOINT_EVERY] embedded photo and
-     * once more at the end, so callers can persist incremental progress.
-     * Cancellation (permission revoked / app backgrounded) stops cleanly at
-     * the next photo boundary — completed work is kept by the caller.
+     * [onCheckpoint] fires after every [CHECKPOINT_EVERY] embedded photos and
+     * once more at the end. Checkpoints are SKIPPED while nothing new has been
+     * embedded — the v0.2.2 diag log showed identical ~26 MB saves firing every
+     * 50 photos when all decodes failed, which was pure I/O churn.
+     *
+     * Decode failures are counted with per-pipeline reasons (v0.2.3: the
+     * repository tries ImageDecoder → BitmapFactory → loadThumbnail and
+     * reports each failure); the first N details go to [Diagnostics].
      */
     suspend fun embedMissing(
         photos: List<PhotoMetadata>,
@@ -84,44 +89,48 @@ class GalleryIndexer(
 
         processed.set(0)
         var sinceCheckpoint = 0
-        // DIAGNOSTIC BUILD: per-photo failures are silently skipped today;
-        // count them and keep the first failure's detail for the diag panel.
         var decodeFailures = 0
-        var embedFailures = 0
+        var embeddedThisPass = 0
+        var lastCheckpointEmbedded = 0
+        var reasonSamples = 0
         var firstFailure: String? = null
         for (photo in pending) {
             currentCoroutineContext().ensureActive() // cooperative cancel
             if (cancelled.get()) break
 
-            var decodeThrew = false
-            val bmp: Bitmap? = runCatching {
-                repository.decodeThumbnail(Uri.parse(photo.contentUri))
-            }.onFailure {
-                decodeThrew = true
-                decodeFailures++
-                if (firstFailure == null) {
-                    firstFailure = "decode id=${photo.id}: ${it::class.java.simpleName}: ${it.message}"
+            val reasons = mutableListOf<String>()
+            val bmp: Bitmap? = try {
+                repository.decodeThumbnail(Uri.parse(photo.contentUri)) { reason ->
+                    reasons += reason
                 }
-                Log.w(TAG, "decode failed for ${photo.id}", it)
-            }.getOrNull()
-            if (bmp == null && !decodeThrew) {
-                // decodeThumbnail returned null without throwing (null stream /
-                // bad bounds) — that's a failure too, not "nothing to do".
+            } catch (e: Exception) {
+                reasons += "decode threw: ${e::class.java.simpleName}: ${e.message}"
+                null
+            }
+            if (bmp == null) {
                 decodeFailures++
                 if (firstFailure == null) {
-                    firstFailure = "decode id=${photo.id}: decoder returned null"
+                    firstFailure = "decode id=${photo.id} (${photo.displayName}): " +
+                        reasons.joinToString(" | ").ifEmpty { "decoder returned null" }
+                } else if (reasonSamples < MAX_REASON_SAMPLES) {
+                    // Sample a few more distinct failures across the pass.
+                    reasonSamples++
+                    Diagnostics.log(
+                        "decode fail id=${photo.id}: " +
+                            reasons.joinToString(" | ").ifEmpty { "decoder returned null" },
+                    )
                 }
             }
             if (bmp != null) {
-                runCatching { engine.embedImage(bmp) }
-                    .onSuccess { photo.embedding = it }
-                    .onFailure {
-                        embedFailures++
-                        if (firstFailure == null) {
-                            firstFailure = "embed id=${photo.id}: ${it::class.java.simpleName}: ${it.message}"
-                        }
-                        Log.w(TAG, "embed failed for ${photo.id}", it)
-                    }
+                try {
+                    photo.embedding = engine.embedImage(bmp)
+                    embeddedThisPass++
+                } catch (e: CancellationException) {
+                    bmp.recycle()
+                    throw e
+                } catch (e: Exception) {
+                    Log.w(TAG, "embed failed for ${photo.id}", e)
+                }
                 bmp.recycle()
             }
 
@@ -130,18 +139,28 @@ class GalleryIndexer(
             _progress.value = _progress.value.copy(processed = n)
             if (sinceCheckpoint >= CHECKPOINT_EVERY) {
                 sinceCheckpoint = 0
-                Diagnostics.log(
-                    "checkpoint: ${processed.get()}/${pending.size} processed " +
-                        "($decodeFailures decode fails, $embedFailures embed fails)",
-                )
-                onCheckpoint(photos)
+                if (embeddedThisPass > lastCheckpointEmbedded) {
+                    lastCheckpointEmbedded = embeddedThisPass
+                    Diagnostics.log(
+                        "checkpoint: ${processed.get()}/${pending.size} processed, " +
+                            "$embeddedThisPass embedded, $decodeFailures decode fails — saving",
+                    )
+                    onCheckpoint(photos)
+                } else {
+                    Diagnostics.log(
+                        "checkpoint: ${processed.get()}/${pending.size} processed, " +
+                            "$decodeFailures decode fails — skip save (nothing new)",
+                    )
+                }
             }
         }
-        if (sinceCheckpoint > 0) onCheckpoint(photos)
+        if (sinceCheckpoint > 0 && embeddedThisPass > lastCheckpointEmbedded) {
+            onCheckpoint(photos)
+        }
 
         Diagnostics.log(
-            "embed pass done: ${pending.size} attempted, ${decodeFailures} decode " +
-                "failures, ${embedFailures} embed failures" +
+            "embed pass done: ${pending.size} attempted, $embeddedThisPass embedded, " +
+                "$decodeFailures decode failures" +
                 (firstFailure?.let { " — first: $it" } ?: ""),
         )
 
@@ -158,5 +177,8 @@ class GalleryIndexer(
 
         /** Persist partial progress every N embedded photos. */
         const val CHECKPOINT_EVERY = 50
+
+        /** Cap for per-photo decode-failure detail lines in the diag panel. */
+        const val MAX_REASON_SAMPLES = 5
     }
 }
