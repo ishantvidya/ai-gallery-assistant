@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Photo access (modern, least-privilege):
+         - API 33+: READ_MEDIA_IMAGES (granular media permission).
+         - API 33+: READ_MEDIA_VISUAL_USER_SELECTED is granted when the user
+           picks only some photos ("partial access"); MediaStore then returns
+           only the selected items. No code change needed to respect it.
+         - API <= 32: READ_EXTERNAL_STORAGE (maxSdkVersion caps it). -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+
+    <!-- Deliberately NOT requested: location (EXIF is stripped by MediaStore
+         queries we use), contacts, microphone, camera, or any file-system
+         (MANAGE_EXTERNAL_STORAGE) access. Photos are processed on-device only;
+         the app performs no network I/O. -->
+
+    <application
+        android:allowBackup="false"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.GalleryAssist">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

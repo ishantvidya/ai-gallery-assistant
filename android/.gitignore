@@ -1,0 +1,15 @@
+*.iml
+.gradle/
+local.properties
+.idea/
+.DS_Store
+build/
+.kotlin/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Signing material must never enter the repo (kept outside, see android/README.md)
+*.jks
+*.keystore
+*.jks.b64

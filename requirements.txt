@@ -1,0 +1,10 @@
+# AI Gallery Assistant - V1
+# Exact versions verified working in Milestone 1 (Python 3.12.10, Windows).
+# NOTE: torch==2.13.0 resolves to the CPU build on Windows, which is all we need.
+
+torch==2.13.0
+sentence-transformers==5.7.0
+pillow==12.3.0
+numpy==2.5.2
+flask==3.1.3
+faiss-cpu>=1.7.4

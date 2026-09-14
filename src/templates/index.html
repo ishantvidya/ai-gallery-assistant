@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI Gallery Assistant</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><defs><linearGradient id='g' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='%237c5cff'/><stop offset='1' stop-color='%2300d4ff'/></linearGradient></defs><rect width='16' height='16' rx='4' fill='url(%23g)'/><circle cx='8' cy='8' r='3.2' fill='white' opacity='.9'/></svg>">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="page">
+
+    <header class="hero">
+      <h1><span class="accent">AI</span> Gallery Assistant</h1>
+      <p class="tagline">Ask your photos in plain language — no keywords needed.</p>
+    </header>
+
+    <form id="search-form" class="search-bar" autocomplete="off">
+      <input id="query" type="text" placeholder="Search your photos… e.g. “a robot”"
+             aria-label="Search query" required>
+      <label class="k-label" for="k-select">Show</label>
+      <select id="k-select" title="Number of results" aria-label="Number of results">
+        <option value="2">2</option>
+        <option value="3">3</option>
+        <option value="6" selected>6</option>
+        <option value="9">9</option>
+        <option value="12">12</option>
+        <option value="20">20</option>
+      </select>
+      <button type="submit" id="submit-btn">Search</button>
+    </form>
+
+    <div id="history" class="chips-row" hidden></div>
+    <div id="status" class="status" hidden></div>
+    <div id="error" class="error" hidden></div>
+
+    <div id="empty" class="empty">
+      <p>No query yet. Try one of these:</p>
+      <div class="chips-row" id="suggestions"></div>
+    </div>
+
+    <main id="grid" class="grid"></main>
+
+    <footer id="footer" class="footer"></footer>
+
+  </div>
+
+  <script>
+    const SUGGESTIONS = ["a robot", "a car", "an apple", "a sunset at the beach", "electronics"];
+
+    const form = document.getElementById("search-form");
+    const input = document.getElementById("query");
+    const kSelect = document.getElementById("k-select");
+    const grid = document.getElementById("grid");
+    const statusEl = document.getElementById("status");
+    const errorEl = document.getElementById("error");
+    const emptyEl = document.getElementById("empty");
+    const historyEl = document.getElementById("history");
+    const suggestionsEl = document.getElementById("suggestions");
+    const footerEl = document.getElementById("footer");
+    const submitBtn = document.getElementById("submit-btn");
+
+    // ---- suggestion chips -------------------------------------------------
+    for (const s of SUGGESTIONS) {
+      const chip = document.createElement("button");
+      chip.className = "chip";
+      chip.textContent = s;
+      chip.addEventListener("click", () => runSearch(s));
+      suggestionsEl.appendChild(chip);
+    }
+
+    // ---- search history (stored in the browser, survives restarts) --------
+    const HISTORY_KEY = "aga_history";
+
+    function getHistory() {
+      try { return JSON.parse(localStorage.getItem(HISTORY_KEY)) || []; }
+      catch { return []; }
+    }
+
+    function addHistory(q) {
+      const next = [q, ...getHistory().filter(x => x !== q)].slice(0, 8);
+      localStorage.setItem(HISTORY_KEY, JSON.stringify(next));
+      renderHistory();
+    }
+
+    function renderHistory() {
+      const h = getHistory();
+      historyEl.hidden = h.length === 0;
+      historyEl.innerHTML = "";
+      for (const q of h) {
+        const chip = document.createElement("button");
+        chip.className = "chip history-chip";
+        chip.textContent = "↺ " + q;
+        chip.addEventListener("click", () => runSearch(q));
+        historyEl.appendChild(chip);
+      }
+    }
+
+    // ---- search -----------------------------------------------------------
+    async function runSearch(q) {
+      q = q.trim();
+      if (!q) return;
+      input.value = q;
+      errorEl.hidden = true;
+      statusEl.hidden = true;
+      emptyEl.hidden = true;
+      grid.innerHTML = "";
+      submitBtn.disabled = true;
+
+      try {
+        const res = await fetch(`/api/search?q=${encodeURIComponent(q)}&k=${kSelect.value}`);
+        const data = await res.json();
+        if (!res.ok) { showError(data.error || "Something went wrong."); return; }
+        addHistory(q);
+        renderResults(data);
+      } catch {
+        showError("Could not reach the server.");
+      } finally {
+        submitBtn.disabled = false;
+      }
+    }
+
+    function renderResults(data) {
+      statusEl.hidden = false;
+      statusEl.textContent =
+        `“${data.query}” — ${data.results.length} result(s) in ${data.elapsed_ms} ms${data.technique ? ` (${data.technique})` : ''}`;
+
+      grid.innerHTML = "";
+      data.results.forEach((r, i) => {
+        // Build cards with DOM APIs (textContent) instead of innerHTML:
+        // filenames come from disk and must never be treated as HTML.
+        const card = document.createElement("figure");
+        card.className = "card";
+        card.style.animationDelay = `${i * 55}ms`;
+
+        const img = document.createElement("img");
+        img.src = `/image/${encodeURI(r.path)}`;
+        img.alt = r.name;
+        img.loading = "lazy";
+
+        const caption = document.createElement("figcaption");
+        const name = document.createElement("span");
+        name.className = "name";
+        name.textContent = r.name;
+        const score = document.createElement("span");
+        score.className = "score";
+        score.textContent = `${Math.round(r.score * 1000) / 10}%`;
+
+        caption.append(name, score);
+        card.append(img, caption);
+        grid.appendChild(card);
+      });
+    }
+
+    function showError(msg) {
+      errorEl.textContent = "⚠ " + msg;
+      errorEl.hidden = false;
+    }
+
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      runSearch(input.value);
+    });
+
+    // ---- footer: show how many photos are indexed -------------------------
+    fetch("/api/stats")
+      .then(r => r.json())
+      .then(s => {
+        if (s.indexed === 0) {
+          footerEl.textContent = 'No index yet — run "python main.py --index"';
+        } else if (s.on_disk > s.indexed) {
+          footerEl.textContent = `Indexed ${s.indexed} photo(s) — but data/images now has ${s.on_disk}. Re-run "python main.py --index".`;
+        } else {
+          footerEl.textContent = `Indexed ${s.indexed} photo(s). All photos stay on this computer.`;
+        }
+      })
+      .catch(() => {});
+
+    renderHistory();
+  </script>
+</body>
+</html>

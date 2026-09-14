@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Generated data (created by indexer.py)
+embeddings/
+
+# Your personal photos
+data/images/
+
+# ONNX models — too large for GitHub (pushed to device via adb instead, see android/README.md)
+models/

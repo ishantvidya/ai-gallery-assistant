@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Gallery Assistant — search your photos by describing them</title>
+<meta name="description" content="A private, on-device AI photo search app for Android. Type what you remember; find the photo. Photos never leave your phone.">
+<style>
+  :root {
+    --bg: #0e1116; --panel: #161b23; --line: #232b36;
+    --text: #e6e9ee; --muted: #98a2b3; --accent: #4f8cff; --accent2: #7c5cff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "Segoe UI", system-ui, -apple-system, Arial, sans-serif;
+    background: var(--bg); color: var(--text); line-height: 1.6;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; padding: 0 20px; }
+  header { padding: 28px 0; }
+  .logo { font-weight: 700; font-size: 18px; letter-spacing: .3px; }
+  .logo span { color: var(--accent); }
+  .hero { text-align: center; padding: 56px 0 40px; }
+  .hero h1 {
+    font-size: clamp(30px, 5vw, 46px); line-height: 1.15; font-weight: 800;
+    background: linear-gradient(90deg, var(--accent), var(--accent2));
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+  }
+  .hero p.sub { color: var(--muted); font-size: clamp(15px, 2.2vw, 18px); margin: 16px auto 0; max-width: 560px; }
+  .demo {
+    margin: 28px auto 0; max-width: 520px; background: var(--panel);
+    border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; text-align: left;
+  }
+  .demo .q { color: var(--text); }
+  .demo .q::before { content: "⌕ "; color: var(--accent); font-weight: 700; }
+  .demo .row { display: flex; gap: 8px; margin-top: 10px; }
+  .demo .thumb { flex: 1; aspect-ratio: 1; border-radius: 8px; }
+  .t1 { background: linear-gradient(135deg, #f6b26b, #e06666); }
+  .t2 { background: linear-gradient(135deg, #6fa8dc, #3d85c6); }
+  .t3 { background: linear-gradient(135deg, #93c47d, #38761d); }
+  .t4 { background: linear-gradient(135deg, #b4a7d6, #674ea7); }
+  .cta { margin-top: 30px; display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+  .btn {
+    display: inline-block; padding: 13px 26px; border-radius: 10px; font-weight: 700;
+    text-decoration: none; font-size: 16px;
+  }
+  .btn-primary {
+    background: linear-gradient(90deg, var(--accent), var(--accent2)); color: #fff;
+  }
+  .btn-ghost { border: 1px solid var(--line); color: var(--text); }
+  .btn:hover { filter: brightness(1.1); }
+  .small { color: var(--muted); font-size: 13px; margin-top: 10px; }
+  section { padding: 36px 0; border-top: 1px solid var(--line); }
+  h2 { font-size: 22px; margin-bottom: 18px; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 18px;
+  }
+  .card h3 { font-size: 16px; margin-bottom: 6px; }
+  .card p { color: var(--muted); font-size: 14px; }
+  ol.steps { margin-left: 20px; color: var(--muted); }
+  ol.steps li { margin: 8px 0; }
+  ol.steps b { color: var(--text); }
+  code {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+    padding: 2px 6px; font-size: 13px;
+  }
+  footer { border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; padding: 24px 0 40px; text-align: center; }
+</style>
+</head>
+<body>
+<header class="wrap">
+  <div class="logo">AI Gallery <span>Assistant</span></div>
+</header>
+
+<div class="wrap">
+  <div class="hero">
+    <h1>Search your photos<br>by describing them</h1>
+    <p class="sub">Type “dog at the beach” or “that sunset over the mountains” — the AI finds the photo.
+       It runs entirely on your phone.</p>
+
+    <div class="demo" aria-hidden="true">
+      <div class="q">sunset over the mountains</div>
+      <div class="row">
+        <div class="thumb t1"></div><div class="thumb t2"></div>
+        <div class="thumb t3"></div><div class="thumb t4"></div>
+      </div>
+    </div>
+
+    <div class="cta">
+      <!-- TODO(repo owner): replace OWNER/REPO with the GitHub owner/repo -->
+      <a class="btn btn-primary" href="https://github.com/OWNER/REPO/releases/latest/download/gallery-assist.apk">Download APK</a>
+      <a class="btn btn-ghost" href="https://github.com/OWNER/REPO">View source</a>
+    </div>
+    <p class="small">Android 8.0+ · ~XX MB · includes the on-device AI model · no account, no tracking</p>
+  </div>
+
+  <section>
+    <h2>Private by architecture</h2>
+    <div class="cards">
+      <div class="card"><h3>🔒 Photos never leave the phone</h3>
+        <p>There is no server. All AI inference happens on-device with ONNX Runtime — the app has no
+           network permission at all.</p></div>
+      <div class="card"><h3>⚡ Works offline</h3>
+        <p>After install, search works with airplane mode on. The model ships inside the app.</p></div>
+      <div class="card"><h3>🧠 Real CLIP intelligence</h3>
+        <p>A quantized CLIP vision-language model understands scenes, objects and concepts —
+           not just filenames.</p></div>
+      <div class="card"><h3>🆓 Free & open source</h3>
+        <p>No accounts, no ads, no telemetry. Source code is public.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Install in 4 steps</h2>
+    <ol class="steps">
+      <li><b>Download</b> the APK using the button above.</li>
+      <li><b>Open it.</b> Android will warn about installing from your browser — tap
+          <b>“Install anyway”</b> (this appears because the app isn’t from a store).</li>
+      <li><b>Open the app</b> and pick some photos with the built-in picker.</li>
+      <li><b>Type what you remember.</b> The photos are indexed on your phone — then search away.</li>
+    </ol>
+    <p class="small">Updating: download the new APK and install it over the old version — your data stays.</p>
+  </section>
+
+  <section>
+    <h2>Why sideload instead of Play Store?</h2>
+    <p style="color:var(--muted); font-size:14px;">
+      Distribution through GitHub keeps the app fully free and independent: no store review delays,
+      no developer fees, and identical privacy guarantees. The tradeoff is the one-time
+      “unknown sources” warning on install.
+    </p>
+  </section>
+
+  <footer>
+    AI Gallery Assistant — on-device CLIP (ViT-B/32, quantized) via ONNX Runtime.
+    Built with Kotlin + Jetpack Compose. © 2026 · <a style="color:var(--muted)" href="https://github.com/OWNER/REPO">GitHub</a>
+  </footer>
+</div>
+</body>
+</html>
